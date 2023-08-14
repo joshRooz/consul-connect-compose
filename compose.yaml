@@ -1,0 +1,214 @@
+# project name determines the consul datacenter name and tls file prefixes.
+name: ccvp-1 # consul connect vault provider
+
+services:
+  config:
+    image: local/config:ccvp
+    build:
+      context: images/config
+      args:
+        CONSUL_IMAGE: ${CONSUL_IMAGE}
+        CONSUL_VERSION: ${CONSUL_VERSION}
+        VAULT_IMAGE: ${VAULT_IMAGE}
+        VAULT_VERSION: ${VAULT_VERSION}
+    restart: no  # default
+    networks:
+      - ccvp_flat
+    environment:
+      VAULT_ADDR: http://${COMPOSE_PROJECT_NAME}-vault-dev:8200
+      VAULT_TOKEN: ${VAULT_TOKEN}
+      CONSUL_HTTP_ADDR: https://${COMPOSE_PROJECT_NAME}-consul-server:8501
+      CONSUL_HTTP_TOKEN: ${CONSUL_TOKEN}
+      CONSUL_HTTP_SSL_VERIFY: false
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
+    secrets:
+      - source: consul_enterprise_license
+        target: /consul/license/consul.hclic
+      - source: vault_enterprise_license
+        target: /vault/license/consul.hclic
+    volumes:
+      - consul_pki:/consul-pki:rw
+
+  vault-dev:
+    image: ${VAULT_IMAGE}:${VAULT_VERSION}
+    hostname: ${COMPOSE_PROJECT_NAME}-vault-dev
+    restart: unless-stopped
+    networks:
+      - ccvp_flat
+    ports:
+      - 8200/tcp  # dynamic port bindings so we can spin up multiple compose environments
+    environment:
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN}
+      VAULT_LICENSE_PATH: /vault/license/vault.hclic
+      VAULT_LOG_LEVEL: debug
+      #VAULT_LOCAL_CONFIG: '{}'
+    secrets:
+      - source: vault_enterprise_license
+        target: /vault/license/vault.hclic
+    cap_add:
+      - IPC_LOCK
+
+  consul-server:
+    image: ${CONSUL_IMAGE}:${CONSUL_VERSION}
+    hostname: ${COMPOSE_PROJECT_NAME}-consul-server
+    restart: unless-stopped
+    networks:
+      - ccvp_flat
+    ports:
+      - 8501/tcp
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        /usr/local/bin/docker-entrypoint.sh agent
+        -bootstrap-expect=1
+        -client=0.0.0.0
+        -auto-reload-config
+        -datacenter=${COMPOSE_PROJECT_NAME}
+        -encrypt=${CONSUL_GOSSIP_KEY}
+        -retry-join=${COMPOSE_PROJECT_NAME}-consul-server
+        -server
+        -ui
+        -hcl='acl {
+          enabled = true,
+          default_policy = "deny",
+          down_policy = "extend-cache",
+          tokens { initial_management = "${CONSUL_TOKEN}", agent = "${CONSUL_TOKEN}" }
+        }'
+        -hcl='addresses { http = "127.0.0.1" }'
+        -hcl='auto_encrypt { allow_tls = true }'
+        -hcl='connect {
+          enabled = true,
+          ca_config = {
+            root_cert_ttl = "648h",
+            intermediate_cert_ttl = "216h",
+            leaf_cert_ttl = "72h"
+          }
+        }'
+        -hcl='performance { raft_multiplier = 5 }'
+        -hcl='ports { grpc = -1, grpc_tls = 8502, https = 8501, serf_wan = -1 }'
+        -hcl='tls {
+          defaults {
+            ca_file = "/consul/tls/consul-agent-ca.pem",
+            cert_file = "/consul/tls/${COMPOSE_PROJECT_NAME}-server-consul-0.pem",
+            key_file = "/consul/tls/${COMPOSE_PROJECT_NAME}-server-consul-0-key.pem",
+            verify_incoming = false,
+            verify_outgoing = true
+          },
+          grpc {
+            use_auto_cert = false
+          },
+          internal_rpc {
+            verify_incoming = true,
+            verify_server_hostname = true
+          }
+        }'
+    environment:
+      CONSUL_LICENSE_PATH: /consul/license/consul.hclic
+    volumes:
+      - consul_pki:/consul/tls:ro # config creates the certs on the fly
+    secrets:
+      - source: consul_enterprise_license
+        target: /consul/license/consul.hclic
+
+  mesh-gateway:
+    image: local/consul-gateway:ccvp
+    hostname: ${COMPOSE_PROJECT_NAME}-mesh-gateway
+    build:
+      context: images/consul-gateway
+      args:
+        CONSUL_IMAGE: ${CONSUL_IMAGE}
+        CONSUL_VERSION: ${CONSUL_VERSION}
+        ENVOY_IMAGE: ${ENVOY_IMAGE}
+        ENVOY_VERSION: ${ENVOY_VERSION}
+    restart: unless-stopped
+    networks:
+      - ccvp_flat
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
+      CONSUL_GOSSIP_KEY: ${CONSUL_GOSSIP_KEY}
+      CONSUL_CACERT: /consul/tls/consul-agent-ca.pem
+      CONSUL_HTTP_TOKEN: ${CONSUL_TOKEN}
+      #CONSUL_LOCAL_CONFIG: ''
+      GATEWAY_KIND: mesh
+    secrets:
+      - source: consul_enterprise_license
+        target: /consul/license/consul.hclic
+    volumes:
+      - consul_pki:/consul/tls:ro
+
+  # builds consul, envoy, and counting into a single container image
+  # entrypoint forks three processes and registers the service w/ proxy
+  counting:
+    image: local/counting:ccvp
+    hostname: ${COMPOSE_PROJECT_NAME}-counting
+    build:
+      context: images/counting
+      args:
+        CONSUL_IMAGE: ${CONSUL_IMAGE}
+        CONSUL_VERSION: ${CONSUL_VERSION}
+        ENVOY_IMAGE: ${ENVOY_IMAGE}
+        ENVOY_VERSION: ${ENVOY_VERSION}
+    restart: unless-stopped
+    privileged: true # iptables - drop counting unless source is localhost
+    networks:
+      - ccvp_flat
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
+      CONSUL_GOSSIP_KEY: ${CONSUL_GOSSIP_KEY}
+      CONSUL_CACERT: /consul/tls/consul-agent-ca.pem
+      CONSUL_HTTP_TOKEN: ${CONSUL_TOKEN}
+      #CONSUL_LOCAL_CONFIG: ''
+      COUNTING_PORT: 9001
+    secrets:
+      - source: consul_enterprise_license
+        target: /consul/license/consul.hclic
+    volumes:
+      - consul_pki:/consul/tls:ro
+
+  # builds consul, envoy, and dashboard into a single container image
+  # entrypoint forks three processes and registers the service w/ proxy
+  dashboard:
+    image: local/dashboard:ccvp
+    hostname: ${COMPOSE_PROJECT_NAME}-dashboard
+    build:
+      context: images/dashboard
+      args:
+        CONSUL_IMAGE: ${CONSUL_IMAGE}
+        CONSUL_VERSION: ${CONSUL_VERSION}
+        ENVOY_IMAGE: ${ENVOY_IMAGE}
+        ENVOY_VERSION: ${ENVOY_VERSION}
+    restart: unless-stopped
+    networks:
+      - ccvp_flat
+    ports:
+      - 8080/tcp
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
+      CONSUL_GOSSIP_KEY: ${CONSUL_GOSSIP_KEY}
+      CONSUL_CACERT: /consul/tls/consul-agent-ca.pem
+      CONSUL_HTTP_TOKEN: ${CONSUL_TOKEN}
+      #CONSUL_LOCAL_CONFIG: ''
+      COUNTING_SERVICE_URL: http://localhost:9001 # envoy proxy
+      DASHBOARD_PORT: 8080
+    secrets:
+      - source: consul_enterprise_license
+        target: /consul/license/consul.hclic
+    volumes:
+      - consul_pki:/consul/tls:ro
+
+networks:
+  ccvp_flat:
+    external: true
+    name: ccvp-flat
+
+secrets:
+  vault_enterprise_license:
+    file: ${VAULT_LICENSE_PATH}
+  consul_enterprise_license:
+    file: ${CONSUL_LICENSE_PATH}
+
+volumes:
+  consul_pki:
+    driver: local
