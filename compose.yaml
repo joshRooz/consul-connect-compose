@@ -81,9 +81,9 @@ services:
         -hcl='connect {
           enabled = true,
           ca_config = {
-            root_cert_ttl = "648h",
-            intermediate_cert_ttl = "216h",
-            leaf_cert_ttl = "72h"
+            root_cert_ttl = "3h",
+            intermediate_cert_ttl = "3h",
+            leaf_cert_ttl = "1h"
           }
         }'
         -hcl='performance { raft_multiplier = 5 }'

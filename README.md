@@ -35,7 +35,7 @@ make down
 *with modified TTL on Consul CA at bootstrap*
 ```sh
 # get the cross-signed ca root
-curl -s -k -H "X-Consul-Token: $CONSUL_HTTP_TOKEN" $CONSUL_HTTP_ADDR/v1/agent/connect/ca/roots  | jq
+docker exec ccvp-1-consul-server-1 curl -s 127.0.0.1:8500/v1/agent/connect/ca/roots | jq -r .Roots[].RootCert | openssl x509 -noout -text | grep -E '^|Not (Before|After)'
 ```
 
 ## Inspecting a Service
