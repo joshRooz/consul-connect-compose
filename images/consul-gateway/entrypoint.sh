@@ -46,9 +46,61 @@ until curl --silent --fail --header "X-Consul-Token: $CONSUL_HTTP_TOKEN" http://
   sleep 2
 done
 
-
+# NOTE: config entries partition scope inherited from the agent (which is passed in through CONSUL_LOCAL_CONFIG environment variable)
 case ${GATEWAY_KIND} in
-  api)
+  api|agw)
+    # create an api gateway config entry - includes listener configurations and references to tls cert.
+    consul config write - <<-EOF
+			Kind = "api-gateway"
+			Name = "api-gateway"
+			Listeners = [{
+			  Name = "tcp-listener"
+			  Port = 8000
+			  Protocol = "tcp"
+			},
+			{
+			  Name = "http-listener"
+			  Port = 8080
+			  Protocol = "http"
+			},
+			{
+			  Name = "https-listener"
+			  Port = 8443
+			  Protocol = "http"
+			  TLS = { Certificates = [] }
+			}]
+		EOF
+
+    consul config write - <<-EOF
+			Kind = "http-route"
+			Name = "counting-http-route"
+			Hostnames = ["counting.default.bridge.internal"]
+			
+			Parents = [
+			  {
+			    Kind        = "api-gateway"
+			    Name        = "api-gateway"
+			    SectionName = "http-listener"
+			  }
+			]
+			
+			Rules = [
+			  {
+			    Services = [
+			      {
+			        Name = "counting"
+			      }
+			    ]
+			  }
+			]
+		EOF
+
+    # fork envoy process, wrapped by consul helper to generate bootstrap config
+    consul connect envoy \
+    -gateway="api" \
+    -register \
+    -grpc-ca-file="/consul/tls/connect-ca.pem" \
+    -admin-bind="127.0.0.1:19000" &
   ;;
 
   ingress|igw)

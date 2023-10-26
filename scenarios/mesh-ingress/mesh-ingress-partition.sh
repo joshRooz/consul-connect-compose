@@ -57,58 +57,38 @@ curl --insecure --fail-with-body \
 EOF
 
 #--------------------------
-# deploy ingress gateway - replace with api gateway
+# deploy api gateway
 docker run -d \
-  --name ccvp-1-consul-igw \
-  --hostname ccvp-1-igw \
+  --name ccvp-1-consul-agw \
+  --hostname ccvp-1-agw \
   --network ccvp-flat \
   -e COMPOSE_PROJECT_NAME=ccvp-1 \
   -e CONSUL_GOSSIP_KEY="$(awk -F\" '/^CONSUL_GOSSIP_KEY/ {print $(NF -1)}' .env)" \
   -e CONSUL_HTTP_TOKEN="$(awk -F\" '/^CONSUL_TOKEN/ {print $(NF -1)}' .env)" \
-  -e GATEWAY_KIND=ingress \
-  -e SERVICE_ADDR="$addr" \
-  -e SERVICE_PORT=8888 \
+  -e GATEWAY_KIND=api \
   -v ccvp-1_consul_pki:/consul/tls:ro \
   -v ./secrets:/consul/license:ro \
   local/consul-gateway:ccvp 
-igw_addr="$(docker inspect ccvp-1-consul-igw | jq -r '.[].NetworkSettings.Networks."ccvp-flat".IPAddress')"
+agw_addr="$(docker inspect ccvp-1-consul-agw | jq -r '.[].NetworkSettings.Networks."ccvp-flat".IPAddress')"
 
-# deploy external downstream --
-docker run -d --rm \
-  --name ccvp-1-dashboard-external \
-  --hostname ccvp-1-dashboard-external \
-  --network ccvp-flat \
-  --add-host counting.ingress.consul:$igw_addr \
-  -p 9998:9998/tcp \
-  -e PORT=9998 \
-  -e COUNTING_SERVICE_URL="http://counting.ingress.consul:9003" \
-  hashicorp/dashboard-service:0.0.4
+consul config write -http-addr="https://localhost:$ccvp1_port" - <<EOF
+Kind = "http-route"
+Name = "counting-alpha-http-route"
+Hostnames = ["counting.alpha.bridge.internal"]
 
-
-#---------------
-# ingress add listener
-consul config write -http-addr="https://localhost:$ccvp1_port" - <<-EOF
-Kind = "ingress-gateway"
-Name = "ingress-gateway"
-Listeners = [
+Parents = [
   {
-    Port = 9002
-    Protocol = "http"
+    Kind        = "api-gateway"
+    Name        = "api-gateway"
+    SectionName = "http-listener"
+  }
+]
+
+Rules = [
+  {
     Services = [
       {
-        Name = "counting-ext"
-      },
-      {
-        Name = "counting"
-      }
-    ]
-  },
-  {
-    Port = 9003
-    Protocol = "http"
-    Services = [
-      {
-        Name      = "counting"
+        Name   = "counting"
         Partition = "alpha"
       }
     ]
@@ -116,22 +96,33 @@ Listeners = [
 ]
 EOF
 
+# deploy external downstream --
+docker run -d --rm \
+  --name ccvp-1-dashboard-external \
+  --hostname ccvp-1-dashboard-external \
+  --network ccvp-flat \
+  --add-host counting.alpha.bridge.internal:$agw_addr \
+  -p 9998:9998/tcp \
+  -e PORT=9998 \
+  -e COUNTING_SERVICE_URL="http://counting.alpha.bridge.internal:8080" \
+  hashicorp/dashboard-service:0.0.4
+
 # export
-consul config write -http-addr="https://localhost:$ccvp1_port" - <<EOF
-Kind      = "exported-services"
-Partition = "alpha"
-Name      = "alpha"
-Services = [
-  {
-    Name      = "counting"
-    Consumers = [
-      {
-        Partition = "default"
-      }
-    ]
-  }
-]
-EOF
+#consul config write -http-addr="https://localhost:$ccvp1_port" - <<EOF
+#Kind      = "exported-services"
+#Partition = "alpha"
+#Name      = "alpha"
+#Services = [
+#  {
+#    Name      = "counting"
+#    Consumers = [
+#      {
+#        Partition = "default"
+#      }
+#    ]
+#  }
+#]
+#EOF
 
 # authorize 
 consul config write -http-addr="https://localhost:$ccvp1_port" - <<EOF
@@ -141,7 +132,7 @@ Partition = "alpha"
 Namespace = "default"
 Sources = [
   {
-    Name      = "ingress-gateway"
+    Name      = "api-gateway"
     Partition = "default"
     Action    = "allow"
   }

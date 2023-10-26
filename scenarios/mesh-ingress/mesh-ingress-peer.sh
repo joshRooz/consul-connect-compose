@@ -10,58 +10,79 @@ pt="$(consul peering generate-token -name ccvp2-default -http-addr="https://loca
 consul peering establish -name ccvp1-default -peering-token "$pt" -http-addr="https://localhost:${ccvp2_port}"
 
 #--------------------------
-# deploy ingress gateway - replace with api gateway
+# deploy api gateway
 docker run -d \
-  --name ccvp-1-consul-igw \
-  --hostname ccvp-1-igw \
+  --name ccvp-1-consul-agw \
+  --hostname ccvp-1-agw \
   --network ccvp-flat \
   -e COMPOSE_PROJECT_NAME=ccvp-1 \
   -e CONSUL_GOSSIP_KEY="$(awk -F\" '/^CONSUL_GOSSIP_KEY/ {print $(NF -1)}' .env)" \
   -e CONSUL_HTTP_TOKEN="$(awk -F\" '/^CONSUL_TOKEN/ {print $(NF -1)}' .env)" \
-  -e GATEWAY_KIND=ingress \
+  -e GATEWAY_KIND=api \
   -v ccvp-1_consul_pki:/consul/tls:ro \
   -v ./secrets:/consul/license:ro \
   local/consul-gateway:ccvp
-igw_addr="$(docker inspect ccvp-1-consul-igw | jq -r '.[].NetworkSettings.Networks."ccvp-flat".IPAddress')"
+agw_addr="$(docker inspect ccvp-1-consul-agw | jq -r '.[].NetworkSettings.Networks."ccvp-flat".IPAddress')"
 
 # deploy external downstream --
 docker run -d --rm \
   --name ccvp-1-dashboard-external \
   --hostname ccvp-1-dashboard-external \
   --network ccvp-flat \
-  --add-host counting.ingress.consul:$igw_addr \
+  --add-host counting.bridge.internal:$agw_addr \
   -p 9998:9998/tcp \
   -e PORT=9998 \
-  -e COUNTING_SERVICE_URL="http://counting.ingress.consul:9003" \
+  -e COUNTING_SERVICE_URL="http://counting.bridge.internal:8080" \
   hashicorp/dashboard-service:0.0.4
 
 
 #---------------
-# ingress add listener
+# add http-route
 consul config write -http-addr="https://localhost:$ccvp1_port" - <<-EOF
-Kind = "ingress-gateway"
-Name = "ingress-gateway"
-Listeners = [
+Kind = "http-route"
+Name = "counting-http-route"
+Hostnames = [
+  "counting.bridge.internal",
+  "counting.default.bridge.internal",
+  "counting.default.ccvp1.bridge.internal",
+  "counting.default.ccvp2.bridge.internal",
+]
+
+Parents = [
   {
-    Port = 9002
-    Protocol = "http"
+    Kind        = "api-gateway"
+    Name        = "api-gateway"
+    SectionName = "http-listener"
+  }
+]
+
+# Note there is no circuit breaking when weights are assigned
+Rules = [
+  {
+    Matches = [{
+      Headers = [
+        { Match = "prefix", Name = "Host", Value = "counting.default.ccvp1" }
+      ]
+    }]
     Services = [
-      {
-        Name = "counting-ext"
-      },
-      {
-        Name = "counting"
-      }
+      { Name = "counting" }
     ]
   },
   {
-    Port = 9003
-    Protocol = "http"
+    Matches = [{
+      Headers = [
+        { Match = "prefix", Name = "Host", Value = "counting.default.ccvp2" }
+      ]
+    }]
     Services = [
-      {
-        Name = "counting"
-        Peer = "ccvp2-default"
-      }
+      { Name = "counting-ccvp2" }
+    ]
+  },
+  {
+    # without weights assigned appears to be split evenly
+    Services = [
+      { Name = "counting", Weight = 90 },
+      { Name = "counting-ccvp2", Weight = 10 }
     ]
   }
 ]
@@ -84,6 +105,17 @@ Services = [
 ]
 EOF
 
+# service-resolver
+consul config write -http-addr="https://localhost:$ccvp1_port" - <<EOF
+Kind      = "service-resolver"
+Partition = "default"
+Name      = "counting-ccvp2"
+Redirect = {
+  Service = "counting"
+  Peer = "ccvp2-default"
+}
+EOF
+
 # authorize
 consul config write -http-addr="https://localhost:$ccvp2_port" - <<EOF
 Kind      = "service-intentions"
@@ -96,7 +128,7 @@ Sources = [
     Action    = "allow"
   },
   {
-    Name      = "ingress-gateway"
+    Name      = "api-gateway"
     Peer      = "ccvp1-default"
     Action    = "allow"
   }
