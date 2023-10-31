@@ -23,10 +23,10 @@ docker run -d --rm \
   --name ccvp-1-dashboard-external \
   --hostname ccvp-1-dashboard-external \
   --network ccvp-flat \
-  --add-host counting.bridge.internal:$agw_addr \
+  --add-host counting.default.bridge.internal:$agw_addr \
   -p 9998:9998/tcp \
   -e PORT=9998 \
-  -e COUNTING_SERVICE_URL="http://counting.bridge.internal:8080" \
+  -e COUNTING_SERVICE_URL="http://counting.default.bridge.internal:8080" \
   hashicorp/dashboard-service:0.0.4
 
 # authorize
